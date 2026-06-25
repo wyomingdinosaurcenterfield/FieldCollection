@@ -27,20 +27,26 @@ let _cachedExpiry = 0;
 // ─── JWT helpers ─────────────────────────────────────────────────────────────
 
 function b64url(data) {
-  let str;
-  if (data instanceof ArrayBuffer || ArrayBuffer.isView(data)) {
-    const bytes = new Uint8Array(data instanceof ArrayBuffer ? data : data.buffer);
-    str = btoa(String.fromCharCode(...bytes));
+  let bytes;
+  if (data instanceof ArrayBuffer) {
+    bytes = new Uint8Array(data);
+  } else if (ArrayBuffer.isView(data)) {
+    bytes = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
   } else {
-    str = btoa(unescape(encodeURIComponent(data)));
+    bytes = new TextEncoder().encode(data);
   }
-  return str.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  let str = '';
+  for (let i = 0; i < bytes.length; i++) str += String.fromCharCode(bytes[i]);
+  return btoa(str).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
 async function importPrivateKey(pem) {
+  // Robust cleanup: strip surrounding quotes, literal \n, all whitespace
+  pem = pem.trim().replace(/^"+|"+$/g, '');       // strip leading/trailing "
+  pem = pem.replace(/\\n/g, '\n');                 // literal \n → real newline
   const contents = pem
-    .replace(/-----BEGIN PRIVATE KEY-----/, '')
-    .replace(/-----END PRIVATE KEY-----/, '')
+    .replace(/-----BEGIN PRIVATE KEY-----/g, '')
+    .replace(/-----END PRIVATE KEY-----/g, '')
     .replace(/\s+/g, '');
   const binary = atob(contents);
   const bytes = new Uint8Array(binary.length);
@@ -55,6 +61,7 @@ async function importPrivateKey(pem) {
 }
 
 async function makeJWT(email, privateKey) {
+  email = email.trim();
   const now = Math.floor(Date.now() / 1000);
   const header  = b64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
   const payload = b64url(JSON.stringify({
@@ -80,9 +87,23 @@ async function getAccessToken(env) {
   const now = Math.floor(Date.now() / 1000);
   if (_cachedToken && _cachedExpiry > now + 60) return _cachedToken;
 
-  const creds = JSON.parse(env.SA_CREDENTIALS);
-  const key   = await importPrivateKey(creds.private_key);
-  const jwt   = await makeJWT(creds.client_email, key);
+  // Accepts either two separate secrets (SA_EMAIL + SA_PRIVATE_KEY)
+  // or a full service account JSON string (SA_CREDENTIALS)
+  let email, privateKeyPem;
+  if (env.SA_EMAIL && env.SA_PRIVATE_KEY) {
+    email = env.SA_EMAIL;
+    privateKeyPem = env.SA_PRIVATE_KEY;
+  } else if (env.SA_CREDENTIALS) {
+    const creds = typeof env.SA_CREDENTIALS === 'string'
+      ? JSON.parse(env.SA_CREDENTIALS) : env.SA_CREDENTIALS;
+    email = creds.client_email;
+    privateKeyPem = creds.private_key;
+  } else {
+    throw new Error('No service account credentials configured. Add SA_EMAIL + SA_PRIVATE_KEY secrets.');
+  }
+
+  const key = await importPrivateKey(privateKeyPem);
+  const jwt = await makeJWT(email, key);
 
   const resp = await fetch(GOOGLE_TOKEN_URL, {
     method: 'POST',
@@ -126,12 +147,45 @@ export default {
       return new Response('WDC Proxy OK', { headers: corsHeaders(request) });
     }
 
+    // Debug endpoint — tests token acquisition and reports errors
+    if (path === '/health') {
+      const rawKey = env.SA_PRIVATE_KEY || '';
+      const cleaned = rawKey.trim().replace(/^"+|"+$/g, '').replace(/\\n/g, '\n');
+      const b64 = cleaned.replace(/-----BEGIN PRIVATE KEY-----/g,'').replace(/-----END PRIVATE KEY-----/g,'').replace(/\s+/g,'');
+      try {
+        const token = await getAccessToken(env);
+        return new Response(JSON.stringify({
+          ok: true,
+          token_prefix: token.slice(0, 20) + '...',
+          email: env.SA_EMAIL?.trim(),
+          raw_key_length: rawKey.length,
+          raw_key_starts: rawKey.slice(0, 40),
+          b64_length: b64.length,
+          b64_sample: b64.slice(0, 20),
+        }), { headers: { ...corsHeaders(request), 'Content-Type': 'application/json' } });
+      } catch(err) {
+        return new Response(JSON.stringify({
+          ok: false,
+          error: err.message,
+          email: env.SA_EMAIL?.trim(),
+          raw_key_length: rawKey.length,
+          raw_key_starts: rawKey.slice(0, 40),
+          b64_length: b64.length,
+          b64_sample: b64.slice(0, 20),
+        }), { status: 500, headers: { ...corsHeaders(request), 'Content-Type': 'application/json' } });
+      }
+    }
+
     // Route to Google API
     let googleUrl;
     if (path.startsWith('/gapi-upload/')) {
       googleUrl = 'https://www.googleapis.com/upload/' + path.slice('/gapi-upload/'.length) + url.search;
     } else if (path.startsWith('/gapi/')) {
       googleUrl = 'https://www.googleapis.com/' + path.slice('/gapi/'.length) + url.search;
+    } else if (path.startsWith('/sheets/')) {
+      googleUrl = 'https://sheets.googleapis.com/' + path.slice('/sheets/'.length) + url.search;
+    } else if (path.startsWith('/drive/')) {
+      googleUrl = 'https://drive.googleapis.com/' + path.slice('/drive/'.length) + url.search;
     } else {
       return new Response('Not found', { status: 404, headers: corsHeaders(request) });
     }

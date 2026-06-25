@@ -461,10 +461,12 @@ let viewingPhotoIdx = -1;
 // No OAuth — Cloudflare Worker handles Google auth via service account
 function gfetch(url, opts={}) {
   const w = (settings.workerUrl||'').replace(/\/$/,'');
-  if (!w) return fetch(url, opts); // no worker configured, call direct (will fail without token)
+  if (!w) return fetch(url, opts);
   url = url
     .replace('https://www.googleapis.com/upload/', w+'/gapi-upload/')
-    .replace('https://www.googleapis.com/', w+'/gapi/');
+    .replace('https://www.googleapis.com/', w+'/gapi/')
+    .replace('https://sheets.googleapis.com/', w+'/sheets/')
+    .replace('https://drive.googleapis.com/', w+'/drive/');
   if (opts.headers) {
     const src = opts.headers instanceof Headers ? Object.fromEntries(opts.headers) : opts.headers;
     const headers = {};
@@ -1573,11 +1575,11 @@ async function syncSitesTab(){
   const h={'Content-Type':'application/json'};
   const SITES_TAB='Sites';
   // Get spreadsheet metadata to find or create Sites tab
-  const meta=await (await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}?fields=sheets.properties`,{})).json();
+  const meta=await (await gfetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}?fields=sheets.properties`,{})).json();
   let gid;
   const existing=(meta.sheets||[]).find(s=>s.properties.title===SITES_TAB);
   if(!existing){
-    const res=await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}:batchUpdate`,
+    const res=await gfetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}:batchUpdate`,
       {method:'POST',headers:h,body:JSON.stringify({requests:[{addSheet:{properties:{title:SITES_TAB}}}]})});
     const d=await res.json(); gid=d.replies[0].addSheet.properties.sheetId;
   } else { gid=existing.properties.sheetId; }
@@ -1589,12 +1591,12 @@ async function syncSitesTab(){
     new Date(s.createdAt||Date.now()).toISOString()
   ])];
   // Clear and rewrite
-  await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values/${encodeURIComponent(SITES_TAB)}:clear`,
+  await gfetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values/${encodeURIComponent(SITES_TAB)}:clear`,
     {method:'POST',headers:h,body:'{}'});
-  await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values/${encodeURIComponent(SITES_TAB)}!A1?valueInputOption=RAW`,
+  await gfetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values/${encodeURIComponent(SITES_TAB)}!A1?valueInputOption=RAW`,
     {method:'PUT',headers:h,body:JSON.stringify({values:rows})});
   // Format header
-  await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}:batchUpdate`,
+  await gfetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}:batchUpdate`,
     {method:'POST',headers:h,body:JSON.stringify({requests:[
       {repeatCell:{range:{sheetId:gid,startRowIndex:0,endRowIndex:1},
         cell:{userEnteredFormat:{textFormat:{bold:true},backgroundColor:{red:0.306,green:0.608,blue:0.318}}},
@@ -1897,19 +1899,19 @@ async function ensureSheetHeaders(){
   const sid=settings.sheetId;
   const headers={};
   // Check if row 1 has data
-  const chk=await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values/${tab}!1:1`,{headers});
+  const chk=await gfetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values/${tab}!1:1`,{headers});
   const data=await chk.json();
   if((data.values||[]).length) return; // headers already present
   // Write headers
-  await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values/${tab}!1:1?valueInputOption=RAW`,
+  await gfetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}/values/${tab}!1:1?valueInputOption=RAW`,
     {method:'PUT',headers:{...headers,'Content-Type':'application/json'},
      body:JSON.stringify({values:[SHEET_HEADERS]})});
   // Get sheetId (gid) for formatting
-  const meta=await (await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}?fields=sheets.properties`,{headers})).json();
+  const meta=await (await gfetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}?fields=sheets.properties`,{headers})).json();
   const tabName=settings.sheetTab||'Sheet1';
   const gid=(meta.sheets||[]).find(s=>s.properties.title===tabName)?.properties.sheetId??0;
   // Apply bold + green header + alternating row banding
-  await fetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}:batchUpdate`,
+  await gfetch(`https://sheets.googleapis.com/v4/spreadsheets/${sid}:batchUpdate`,
     {method:'POST',headers:{...headers,'Content-Type':'application/json'},
      body:JSON.stringify({requests:[
        // Bold header row

@@ -1,4 +1,4 @@
-const CACHE = 'wdc-v1';
+const CACHE = 'wdc-v3';
 
 self.addEventListener('install', e => {
   self.skipWaiting();
