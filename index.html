@@ -507,12 +507,20 @@ function updateOnline() {
 // ═══════════════════════════════
 // SETTINGS
 // ═══════════════════════════════
+const APP_DEFAULTS = {
+  clientId:  '974219864134-1orlm8j1bhe4pqlesalep4eesvk4ca64.apps.googleusercontent.com',
+  sheetId:   '1EfE3YLUHOGZRxu4pLMeb4n3aQgtgr7jdku56L7Gq4jE',
+  sheetTab:  'Entities',
+  folderId:  '1AWYPdlKsb7jfTyoy3zWKWkDE_XfmBuuu',
+};
 function loadSett() {
-  settings = JSON.parse(localStorage.getItem('wdc_sett')||'{}');
+  const saved = JSON.parse(localStorage.getItem('wdc_sett')||'{}');
+  // Merge defaults for any key not yet set by user
+  settings = Object.assign({}, APP_DEFAULTS, saved);
   document.getElementById('s-collector').value = settings.collector||'';
   document.getElementById('s-client-id').value = settings.clientId||'';
   document.getElementById('s-sheet-id').value = settings.sheetId||'';
-  document.getElementById('s-sheet-tab').value = settings.sheetTab||'Sheet1';
+  document.getElementById('s-sheet-tab').value = settings.sheetTab||'Entities';
   document.getElementById('s-folder-id').value = settings.folderId||'';
 }
 function saveSett() {
@@ -594,6 +602,7 @@ function saveEditSite() {
   site.notes = document.getElementById('es-notes').value.trim();
   saveSitesLS(); closeEditSite(); renderSitesList(); updateHeaderSite();
   showToast('✅ Site updated');
+  autoSyncSites();
 }
 
 function getGPS(targetInputId) {
@@ -636,6 +645,7 @@ function createSite() {
   renderSyncStatus();
   updateNavState();
   showToast('✅ Site "'+name+'" created & selected');
+  autoSyncSites();
 }
 
 function selectSite(id) {
@@ -1131,7 +1141,7 @@ function saveEntry() {
   }
   saveEntriesLS(); renderSitesList();
   showToast('✅ Entry saved!');
-  syncEntry(currentEntry);
+  autoSyncEntry(currentEntry);
   showView('entries');
 }
 
@@ -1706,16 +1716,65 @@ function resolveSiteMerge(keepId, dropId) {
   showToast('✅ Sites merged');
 }
 
+async function autoSyncSites() {
+  if (!accessToken || !navigator.onLine || !settings.sheetId) return;
+  try { await syncSitesTab(); await syncDriveJSON(); }
+  catch(e) { console.warn('Auto-sync sites failed:', e.message); }
+}
+
+async function autoSyncEntry(entry) {
+  if (!accessToken || !navigator.onLine || !settings.sheetId) return;
+  try { await syncEntry(entry); await syncDriveJSON(); }
+  catch(e) { console.warn('Auto-sync entry failed:', e.message); }
+}
+
 function markAllPending(){
   if(!confirm('Mark all entries as unsynced? They will re-upload on next sync.')) return;
   entries.forEach(e=>{e.synced=false; e.sync=undefined;});
   saveEntriesLS(); renderSyncStatus();
   showToast('↩️ All entries marked as pending');
 }
+// Cache folder IDs to avoid repeated Drive API calls within a session
+const _folderCache = {};
+
+async function getOrCreateFolder(name, parentId) {
+  const cacheKey = parentId + '/' + name;
+  if (_folderCache[cacheKey]) return _folderCache[cacheKey];
+  const h = {Authorization:'Bearer '+accessToken};
+  // Search for existing folder
+  const q = `name='${name.replace(/'/g,"\'")}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`;
+  const search = await fetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id)`, {headers:h});
+  const sd = await search.json();
+  if ((sd.files||[]).length) {
+    _folderCache[cacheKey] = sd.files[0].id;
+    return sd.files[0].id;
+  }
+  // Create folder
+  const create = await fetch('https://www.googleapis.com/drive/v3/files?fields=id', {
+    method:'POST', headers:{...h,'Content-Type':'application/json'},
+    body: JSON.stringify({name, mimeType:'application/vnd.google-apps.folder', parents:[parentId]})
+  });
+  const cd = await create.json();
+  _folderCache[cacheKey] = cd.id;
+  return cd.id;
+}
+
+async function getEntryFolder(entry) {
+  if (!settings.folderId) return null;
+  const site = sites.find(s=>s.id===entry.siteId)||{};
+  const siteName = site.name || 'Unknown Site';
+  const specName = entry.specimenNum || entry.id;
+  const siteFolderId = await getOrCreateFolder(siteName, settings.folderId);
+  const specFolderId = await getOrCreateFolder(specName, siteFolderId);
+  return {siteFolderId, specFolderId};
+}
+
 async function uploadPhoto(photo,entry){
   const res=await fetch(photo.dataUrl); const blob=await res.blob();
-  const meta={name:`${entry.specimenNum||'unknown'}_${photo.id}.jpg`};
-  if(settings.folderId) meta.parents=[settings.folderId];
+  const folders = await getEntryFolder(entry);
+  const parentId = folders?.specFolderId || settings.folderId;
+  const meta = {name: photo.name || `${entry.specimenNum||'unknown'}_photo.jpg`};
+  if (parentId) meta.parents = [parentId];
   const form=new FormData();
   form.append('metadata',new Blob([JSON.stringify(meta)],{type:'application/json'}));
   form.append('file',blob);
