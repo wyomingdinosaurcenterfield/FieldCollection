@@ -495,6 +495,16 @@ async function init() {
   window.addEventListener('online', updateOnline);
   window.addEventListener('offline', updateOnline);
   renderAuthArea();
+  // Silently sign in and pull on startup
+  if (settings.clientId && navigator.onLine) {
+    loadGIS();
+    setTimeout(() => {
+      if (tokenClient && !accessToken) {
+        silentSignInToast=true;
+        tokenClient.requestAccessToken({prompt:''});
+      }
+    }, 1200);
+  }
 }
 
 function updateOnline() {
@@ -825,8 +835,9 @@ function showView(name) {
   const nb = document.getElementById('nav-btn-'+name);
   if(nb) nb.classList.add('active');
   document.getElementById('content').scrollTop=0;
-  if(name==='entries') renderEntries();
-  if(name==='settings') { loadSett(); renderAuthArea(); }
+  if(name==='entries') { renderEntries(); silentPull(); }
+  if(name==='sites') silentPull();
+  if(name==='settings') { loadSett(); renderAuthArea(); renderConflictsArea(); }
 }
 
 function cancelForm() {
@@ -1157,60 +1168,20 @@ async function deleteEntry() {
 // ═══════════════════════════════
 // PRINT
 // ═══════════════════════════════
-async function printEntry() {
-  collectForm();
-  const e = currentEntry; if(!e) return;
-  const site = sites.find(s=>s.id===e.siteId);
-  const siteName = site ? site.name : '';
-  const siteLocation = site ? (site.location||'') : '';
-
-  // Load photos from IndexedDB
-  const photoDataUrls = [];
-  for(const pid of (e.photoIds||[])){
-    const p = await dbGet('photos', pid);
-    if(p) photoDataUrls.push(p.dataUrl);
-  }
+function buildPrintBody(e, site, photoDataUrls) {
   const f = v => v||'';
-  const chk = v => v==='Yes' ? '☑ Yes' : v==='No' ? '☐ No' : '☐';
   const pills = arr => (arr||[]).join(', ') || '—';
-  const radialRow = (pt, row) => {
-    const r = ((e.radial||{})[pt]||[])[row]||{};
-    return `<td>${f(r.s)}</td><td>${f(r.m)}</td>`;
-  };
-
+  const siteName = site?.name||'';
+  const siteLocation = site?.location||'';
+  const m1lbl = site?.marker1||'Marker 1';
+  const m2lbl = site?.marker2||'Marker 2';
+  const rc = e.radialCount||1;
+  const radialPts = ['A','B','C','D'].slice(0,rc);
   const photoHtml = photoDataUrls.length
-    ? photoDataUrls.map(u=>`<img src="${u}" style="max-width:180px;max-height:160px;margin:4px;border:1px solid #ccc">`).join('')
-    : '<em style="color:#999">No photos</em>';
-
-  const html = `<!DOCTYPE html><html><head><meta charset="UTF-8">
-<title>WDC Field Specimen Sheet – ${f(e.specimenNum)||'(unsaved)'}</title>
-<style>
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:Arial,Helvetica,sans-serif;font-size:11px;color:#000;padding:14px;max-width:800px;margin:0 auto}
-  h1{font-size:15px;font-weight:bold;text-align:center;border-bottom:2px solid #000;padding-bottom:6px;margin-bottom:10px}
-  h2{font-size:11px;font-weight:bold;background:#ddd;padding:3px 6px;margin:10px 0 5px;border:1px solid #aaa;text-transform:uppercase;letter-spacing:.5px}
-  table{width:100%;border-collapse:collapse;margin-bottom:6px}
-  td,th{border:1px solid #999;padding:3px 6px;vertical-align:top}
-  th{background:#eee;font-weight:bold;white-space:nowrap;width:30%}
-  .field-row{display:grid;grid-template-columns:1fr 1fr;gap:0;margin-bottom:0}
-  .half{border:1px solid #999;padding:3px 6px}
-  .quarter-grid{display:grid;grid-template-columns:repeat(4,1fr);border:1px solid #999;margin-bottom:6px}
-  .qcell{padding:3px 6px;border-right:1px solid #999}
-  .qcell:last-child{border-right:none}
-  .qlabel{font-weight:bold;font-size:9px;color:#555;display:block;margin-bottom:1px}
-  .radial-table{border-collapse:collapse;width:100%;table-layout:fixed}
-  .radial-table td,.radial-table th{border:1px solid #999;padding:3px 5px;text-align:center;overflow:hidden}
-  .radial-table th{background:#eee;font-size:9px}
-  .photos{display:flex;flex-wrap:wrap;gap:6px;border:1px solid #ccc;padding:6px;min-height:60px}
-  .sig-line{border-bottom:1px solid #000;min-height:24px;margin-top:4px}
-  @media print{
-    body{padding:0;max-width:none}
-    @page{margin:1.5cm}
-  }
-</style>
-</head><body>
+    ? photoDataUrls.map(u=>`<img src="${u}" style="max-width:120px;max-height:100px;margin:3px;border:1px solid #ccc">`).join('')
+    : '<em style="color:#999;font-size:9px">No photos</em>';
+  return `
 <h1>Wyoming Dinosaur Center — Field Specimen Sheet</h1>
-
 <div class="quarter-grid">
   <div class="qcell"><span class="qlabel">Dig Site</span>${f(siteName)}</div>
   <div class="qcell"><span class="qlabel">Location</span>${f(siteLocation)}</div>
@@ -1218,93 +1189,209 @@ async function printEntry() {
   <div class="qcell"><span class="qlabel">Date Discovered</span>${f(e.dateDiscovered)}</div>
 </div>
 <div class="quarter-grid">
-  <div class="qcell"><span class="qlabel">Element</span>${[[e.elementLeft?'Left':'',e.elementRight?'Right':''].filter(Boolean).join('/'),f(e.element),f(e.elementOther)].filter(Boolean).join(' ')}</div>
+  <div class="qcell"><span class="qlabel">Element</span>${[[e.elementLeft?'L':'',e.elementRight?'R':''].filter(Boolean).join('/'),f(e.element),f(e.elementOther)].filter(Boolean).join(' ')}</div>
   <div class="qcell"><span class="qlabel">Taxon</span>${[f(e.taxon),f(e.taxonOther)].filter(Boolean).join(' — ')}</div>
-  <div class="qcell"><span class="qlabel">Discovered By</span>${f(e.by)}</div>
-  <div class="qcell"><span class="qlabel">Intern/Staff</span>${f(e.internStaff)}</div>
+  <div class="qcell"><span class="qlabel">Collector</span>${f(e.by)}</div>
+  <div class="qcell"><span class="qlabel">Staff</span>${f(e.internStaff)}</div>
 </div>
 <div class="quarter-grid">
   <div class="qcell"><span class="qlabel">In Situ</span>${f(e.inSitu)||'—'}</div>
   <div class="qcell"><span class="qlabel">Approx Position Known</span>${f(e.approxPosKnown)||'—'}</div>
   <div class="qcell"><span class="qlabel">Bone Missing %</span>${f(e.boneMissing)||'—'}</div>
-  <div class="qcell"><span class="qlabel">Pre-Depositional %</span>${f(e.preDepPct)||'—'}</div>
+  <div class="qcell"><span class="qlabel">Pre-Dep %</span>${f(e.preDepPct)||'—'}</div>
 </div>
-
-<h2>Condition</h2>
-<table>
-  <tr><th>Pre-Depositional Condition</th><td>${pills(e.preDepCondition)}</td></tr>
-  <tr><th>Current Condition</th><td>${pills(e.currentCondition)}</td></tr>
-  <tr><th>Chemicals Used</th><td>${pills(e.chemicals)}</td></tr>
-</table>
-
-<h2>Measurements &amp; Orientation</h2>
-<div class="quarter-grid" style="margin-bottom:6px">
-  <div class="qcell"><span class="qlabel">Orientation</span>${f(e.orientation)}</div>
-  <div class="qcell"><span class="qlabel">Plunge</span>${f(e.plunge)}</div>
-  <div class="qcell"><span class="qlabel">Max Length</span>${f(e.maxLength)}</div>
-  <div class="qcell"><span class="qlabel">Width (mid)</span>${f(e.widthMid)}</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:0;margin-bottom:4px">
+  <div>
+    <h2>Condition</h2>
+    <table>
+      <tr><th>Pre-Dep</th><td>${pills(e.preDepCondition)}</td></tr>
+      <tr><th>Current</th><td>${pills(e.currentCondition)}</td></tr>
+      <tr><th>Chemicals</th><td>${pills(e.chemicals)}</td></tr>
+    </table>
+  </div>
+  <div>
+    <h2>Measurements &amp; Orientation</h2>
+    <table>
+      <tr><th>Orientation</th><td>${f(e.orientation)||'—'}</td><th>Plunge</th><td>${f(e.plunge)||'—'}</td></tr>
+      <tr><th>Max Length</th><td>${f(e.maxLength)||'—'}</td><th>Width Mid</th><td>${f(e.widthMid)||'—'}</td></tr>
+    </table>
+  </div>
 </div>
-
+<h2>Radial Map Points (cm)</h2>
 <table class="radial-table">
-  <colgroup>
-    <col style="width:8%">
-    <col style="width:23%"><col style="width:23%">
-    <col style="width:23%"><col style="width:23%">
-  </colgroup>
-  <tr>
-    <th>Point</th>
-    <th>Stake 1</th><th>Meas 1</th>
-    <th>Stake 2</th><th>Meas 2</th>
-  </tr>
-  ${['A','B','C','D'].map(pt=>`<tr>
-    <th>${pt}</th>
-    ${radialRow(pt,0)}
-    ${radialRow(pt,1)}
-  </tr>`).join('')}
+  <colgroup><col style="width:8%"><col style="width:23%"><col style="width:23%"><col style="width:23%"><col style="width:23%"></colgroup>
+  <tr><th>Pt</th><th>${m1lbl}</th><th>${m2lbl}</th><th></th><th></th></tr>
+  ${radialPts.map(pt=>{const r=(e.radial||{})[pt]||{};return `<tr><th>${pt}</th><td>${f(Array.isArray(r)?r[0]?.s:r.m1)}</td><td>${f(Array.isArray(r)?r[0]?.m:r.m2)}</td><td></td><td></td></tr>`;}).join('')}
 </table>
-
-<h2>Photos</h2>
-<table style="margin-bottom:6px">
-</table>
-<div class="photos">${photoHtml}</div>
-
-<h2>Geologic &amp; Associations</h2>
-<table>
-  <tr><th>Geologic Info</th><td>${f(e.geologicInfo)}</td></tr>
-  <tr><th>Associations</th><td>${f(e.associations)}</td></tr>
-  <tr><th>Jacket Bones</th><td>${f(e.jacketBones)}</td></tr>
-</table>
-
-<h2>Mapping</h2>
-<div class="quarter-grid" style="margin-bottom:6px">
-  <div class="qcell"><span class="qlabel">Date Mapped</span>${f(e.dateMapped)}</div>
-  <div class="qcell"><span class="qlabel">Mapped By</span>${f(e.mappedBy)}</div>
-  <div class="qcell"><span class="qlabel">Placed on Map By</span>${f(e.physMapBy)}</div>
-  <div class="qcell"><span class="qlabel">Physical Map Date</span>${f(e.physMapDate)}</div>
+<div style="display:grid;grid-template-columns:1fr 1fr;gap:0;margin-bottom:4px">
+  <div>
+    <h2>Geologic &amp; Associations</h2>
+    <table>
+      <tr><th>Geologic</th><td>${f(e.geologicInfo)||'—'}</td></tr>
+      <tr><th>Assoc.</th><td>${f(e.associations)||'—'}</td></tr>
+      <tr><th>Jacket</th><td>${f(e.jacketBones)||'—'}</td></tr>
+    </table>
+  </div>
+  <div>
+    <h2>Mapping</h2>
+    <table>
+      <tr><th>Date Mapped</th><td>${f(e.dateMapped)||'—'}</td></tr>
+      <tr><th>Mapped By</th><td>${f(e.mappedBy)||'—'}</td></tr>
+      <tr><th>Phys Map Date</th><td>${f(e.physMapDate)||'—'}</td></tr>
+      <tr><th>Placed By</th><td>${f(e.physMapBy)||'—'}</td></tr>
+    </table>
+  </div>
 </div>
-<table>
-  <tr><th>Ready for Removal</th><td>${f(e.readyForRemoval)||'—'}</td></tr>
-</table>
-
 <h2>Collection &amp; Removal</h2>
 <table>
-  <tr><th>Date Collected</th><td>${f(e.dateCollected)}</td><th>Collected By</th><td>${f(e.collectedBy)}</td></tr>
-  <tr><th>Partially Removed</th><td>${f(e.partiallyRemoved)}</td><th>Removal Method</th><td>${f(e.removalMethod)}</td></tr>
-  <tr><th>Loc. Temp Collections</th><td>${f(e.locTempCollections)}</td><th>Collection Date</th><td>${f(e.collectionDate)}</td></tr>
+  <tr><th>Ready for Removal</th><td>${f(e.readyForRemoval)||'—'}</td><th>Date Collected</th><td>${f(e.dateCollected)||'—'}</td></tr>
+  <tr><th>Collected By</th><td>${f(e.collectedBy)||'—'}</td><th>Removal Method</th><td>${f(e.removalMethod)||'—'}</td></tr>
+  <tr><th>Partially Removed</th><td colspan="3">${f(e.partiallyRemoved)||'—'}</td></tr>
 </table>
-<table style="margin-top:6px">
-  <tr><th>Staff Signature</th><td><div class="sig-line">${f(e.staffSig)}</div></td></tr>
+<table style="margin-top:4px">
+  <tr><th style="width:20%">Staff Signature</th><td><div class="sig-line">${f(e.staffSig)}</div></td></tr>
 </table>
+<h2>Photos</h2>
+<div class="photos">${photoHtml}</div>
+<p style="text-align:center;color:#999;font-size:8px;margin-top:8px">Generated ${new Date().toLocaleString()} · Wyoming Dinosaur Center Field Collection</p>`;
+}
 
-<p style="text-align:center;color:#999;font-size:9px;margin-top:14px">Printed ${new Date().toLocaleString()} · Wyoming Dinosaur Center Field Collection</p>
+function buildPrintHtml(e, site, photoDataUrls) {
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8">
+<title>WDC – ${e.specimenNum||'(unsaved)'}</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{font-family:Arial,Helvetica,sans-serif;font-size:9.5px;color:#000;padding:10px;background:#fff}
+  h1{font-size:13px;font-weight:bold;text-align:center;border-bottom:2px solid #000;padding-bottom:4px;margin-bottom:6px}
+  h2{font-size:9px;font-weight:bold;background:#ddd;padding:2px 5px;margin:5px 0 3px;border:1px solid #aaa;text-transform:uppercase;letter-spacing:.4px}
+  table{width:100%;border-collapse:collapse;margin-bottom:3px}
+  td,th{border:1px solid #999;padding:2px 5px;vertical-align:top}
+  th{background:#eee;font-weight:bold;white-space:nowrap;width:25%}
+  .quarter-grid{display:grid;grid-template-columns:repeat(4,1fr);border:1px solid #999;margin-bottom:3px}
+  .qcell{padding:2px 5px;border-right:1px solid #999}
+  .qcell:last-child{border-right:none}
+  .qlabel{font-weight:bold;font-size:8px;color:#555;display:block;margin-bottom:1px}
+  .radial-table{border-collapse:collapse;width:100%;table-layout:fixed}
+  .radial-table td,.radial-table th{border:1px solid #999;padding:2px 4px;text-align:center}
+  .radial-table th{background:#eee;font-size:8px}
+  .photos{display:flex;flex-wrap:wrap;gap:4px;border:1px solid #ccc;padding:4px;min-height:30px}
+  .sig-line{border-bottom:1px solid #000;min-height:18px}
+  .no-print{display:block}
+  @media print{
+    .no-print{display:none!important}
+    body{padding:0}
+    @page{size:letter portrait;margin:1cm}
+  }
+</style>
+</head><body>
+<div class="no-print" style="background:#f5f5f5;border-bottom:1px solid #ccc;padding:8px 12px;display:flex;gap:10px;align-items:center">
+  <button onclick="window.close()" style="padding:6px 14px;font-size:13px;cursor:pointer;border:1px solid #999;border-radius:5px;background:#fff">← Back</button>
+  <button onclick="window.print()" style="padding:6px 14px;font-size:13px;cursor:pointer;border:none;border-radius:5px;background:#2ECC71;color:#fff;font-weight:bold">🖨 Print</button>
+  <span style="color:#666;font-size:12px">Close print dialog to return here</span>
+</div>
+${buildPrintBody(e, site, photoDataUrls)}
+<script>window.onafterprint = function(){ document.querySelector('.no-print').style.display='flex'; };<\/script>
 </body></html>`;
+}
 
+async function printEntry() {
+  collectForm();
+  const e = currentEntry; if(!e) return;
+  const site = sites.find(s=>s.id===e.siteId);
+  const photoDataUrls = [];
+  for(const pid of (e.photoIds||[])){
+    const p = await dbGet('photos', pid);
+    if(p) photoDataUrls.push(p.dataUrl);
+  }
+  const html = buildPrintHtml(e, site, photoDataUrls);
   const win = window.open('','_blank');
   if(!win){ showToast('Allow pop-ups to print'); return; }
   win.document.write(html);
   win.document.close();
   win.focus();
   setTimeout(()=>{ win.print(); }, 600);
+}
+
+async function loadScript(src) {
+  if (document.querySelector(`script[src="${src}"]`)) return;
+  return new Promise((res,rej)=>{
+    const s=document.createElement('script'); s.src=src; s.onload=res; s.onerror=rej;
+    document.head.appendChild(s);
+  });
+}
+
+async function generateAndUploadPDF(entry) {
+  if (!accessToken || !settings.folderId) return;
+  try {
+    await loadScript('https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js');
+    await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
+    const site = sites.find(s=>s.id===entry.siteId)||{};
+    const photoDataUrls = [];
+    for(const pid of (entry.photoIds||[])){
+      const p = await dbGet('photos',pid); if(p) photoDataUrls.push(p.dataUrl);
+    }
+    // Render print body in off-screen div
+    const wrapper = document.createElement('div');
+    wrapper.style.cssText = 'position:fixed;left:-9999px;top:0;width:780px;background:#fff;padding:10px;font-family:Arial,sans-serif;font-size:9.5px;color:#000;box-sizing:border-box';
+    wrapper.innerHTML = `<style>
+      h1{font-size:13px;font-weight:bold;text-align:center;border-bottom:2px solid #000;padding-bottom:4px;margin-bottom:6px}
+      h2{font-size:9px;font-weight:bold;background:#ddd;padding:2px 5px;margin:5px 0 3px;border:1px solid #aaa;text-transform:uppercase}
+      table{width:100%;border-collapse:collapse;margin-bottom:3px}
+      td,th{border:1px solid #999;padding:2px 5px;vertical-align:top;font-size:9.5px}
+      th{background:#eee;font-weight:bold;white-space:nowrap;width:25%}
+      .quarter-grid{display:grid;grid-template-columns:repeat(4,1fr);border:1px solid #999;margin-bottom:3px}
+      .qcell{padding:2px 5px;border-right:1px solid #999}
+      .qcell:last-child{border-right:none}
+      .qlabel{font-weight:bold;font-size:8px;color:#555;display:block;margin-bottom:1px}
+      .radial-table{border-collapse:collapse;width:100%;table-layout:fixed}
+      .radial-table td,.radial-table th{border:1px solid #999;padding:2px 4px;text-align:center}
+      .radial-table th{background:#eee;font-size:8px}
+      .photos{display:flex;flex-wrap:wrap;gap:4px;border:1px solid #ccc;padding:4px;min-height:30px}
+      .sig-line{border-bottom:1px solid #000;min-height:18px}
+    </style>` + buildPrintBody(entry, site, photoDataUrls);
+    document.body.appendChild(wrapper);
+    const canvas = await html2canvas(wrapper, {scale:1.5, useCORS:true, logging:false, backgroundColor:'#ffffff'});
+    document.body.removeChild(wrapper);
+    const {jsPDF} = window.jspdf;
+    const doc = new jsPDF('p','pt','letter');
+    const pw = doc.internal.pageSize.getWidth();
+    const ph = doc.internal.pageSize.getHeight();
+    const imgData = canvas.toDataURL('image/jpeg', 0.88);
+    const imgH = (canvas.height / canvas.width) * pw;
+    if (imgH <= ph) {
+      doc.addImage(imgData,'JPEG',0,0,pw,imgH);
+    } else {
+      let yOff=0, pageH=ph;
+      while(yOff < imgH) {
+        if(yOff>0) doc.addPage();
+        doc.addImage(imgData,'JPEG',0,-yOff,pw,imgH);
+        yOff+=pageH;
+      }
+    }
+    const pdfBlob = doc.output('blob');
+    // Upload to site folder (get/create site folder, then upload PDF)
+    const folders = await getEntryFolder(entry);
+    const parentId = folders?.siteFolderId || settings.folderId;
+    const pdfName = `${entry.specimenNum||entry.id}_field-sheet.pdf`;
+    // Check if PDF already exists to replace it
+    const h = {Authorization:'Bearer '+accessToken};
+    const q=`name='${pdfName}' and '${parentId}' in parents and trashed=false`;
+    const search = await fetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id)`,{headers:h});
+    const sd = await search.json();
+    if ((sd.files||[]).length) {
+      // Update existing
+      await fetch(`https://www.googleapis.com/upload/drive/v3/files/${sd.files[0].id}?uploadType=media`,
+        {method:'PATCH',headers:{...h,'Content-Type':'application/pdf'},body:pdfBlob});
+    } else {
+      // Create new
+      const meta={name:pdfName,mimeType:'application/pdf',parents:[parentId]};
+      const form=new FormData();
+      form.append('metadata',new Blob([JSON.stringify(meta)],{type:'application/json'}));
+      form.append('file',pdfBlob);
+      await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart',
+        {method:'POST',headers:h,body:form});
+    }
+  } catch(err) { console.warn('PDF generation failed:',err.message); }
 }
 
 // ═══════════════════════════════
@@ -1456,6 +1543,7 @@ function loadGIS(){
   const s=document.createElement('script');s.id='gis-script';s.src='https://accounts.google.com/gsi/client';
   s.onload=initTokenClient;document.head.appendChild(s);
 }
+let silentSignInToast=false;
 function initTokenClient(){
   if(!window.google?.accounts?.oauth2||!settings.clientId) return;
   tokenClient=google.accounts.oauth2.initTokenClient({
@@ -1465,7 +1553,9 @@ function initTokenClient(){
       if(resp.error){showToast('⚠️ Auth failed: '+resp.error);return;}
       accessToken=resp.access_token;
       try{const r=await fetch('https://www.googleapis.com/oauth2/v3/userinfo',{headers:{Authorization:'Bearer '+accessToken}});googleUser=await r.json();}catch(e){}
-      renderAuthArea(); showToast('✅ Signed in as '+(googleUser?.name||'Google User')); renderSyncStatus(); updateOnline();
+      renderAuthArea(); renderSyncStatus(); updateOnline();
+      if(!silentSignInToast){showToast('✅ Signed in as '+(googleUser?.name||'Google User'));} silentSignInToast=false;
+      silentPull();
     },
   });
 }
@@ -1488,6 +1578,7 @@ async function syncEntry(entry){
     const i=entries.findIndex(e=>e.id===entry.id);
     if(i>=0){entries[i].sync='synced';entries[i].driveLinks=links;saveEntriesLS();}
     renderEntries(); showToast('☁️ Synced to Google Sheets');
+    generateAndUploadPDF(entry);
   }catch(err){
     console.error('Sync error',err);
     const i=entries.findIndex(e=>e.id===entry.id);
@@ -1565,6 +1656,39 @@ async function syncDriveJSON(){
     settings.driveDataFileId=d.id;
     localStorage.setItem('wdc_sett',JSON.stringify(settings));
   }
+}
+
+async function silentPull() {
+  if (!accessToken || !navigator.onLine) return;
+  if (!settings.driveDataFileId) {
+    // Try to find by name without bothering the user if not found
+    if (!settings.folderId) return;
+    const q=`name='wdc-field-data.json' and '${settings.folderId}' in parents and trashed=false`;
+    const res=await fetch(`https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id)`,
+      {headers:{Authorization:'Bearer '+accessToken}}).catch(()=>null);
+    if (!res?.ok) return;
+    const d=await res.json();
+    if (!(d.files||[]).length) return;
+    settings.driveDataFileId=d.files[0].id;
+    localStorage.setItem('wdc_sett',JSON.stringify(settings));
+  }
+  try {
+    const res=await fetch(`https://www.googleapis.com/drive/v3/files/${settings.driveDataFileId}?alt=media`,
+      {headers:{Authorization:'Bearer '+accessToken}});
+    if (!res.ok) return;
+    const data=await res.json();
+    let ns=0, ne=0;
+    const siteIds=new Set(sites.map(s=>s.id));
+    for(const s of (data.sites||[])){if(!siteIds.has(s.id)){sites.push(s);ns++;}}
+    saveSitesLS();
+    const entryIds=new Set(entries.map(e=>e.id));
+    for(const e of (data.entries||[])){if(!entryIds.has(e.id)){entries.push(e);ne++;}}
+    saveEntriesLS();
+    if (ns||ne) {
+      renderSitesList(); renderEntries(); renderSyncStatus(); detectConflicts();
+      showToast(`⬇️ ${ns} new site${ns!==1?'s':''}, ${ne} new entr${ne!==1?'ies':'y'}`);
+    }
+  } catch(_) {} // silently ignore errors
 }
 
 async function pullFromDrive(){
